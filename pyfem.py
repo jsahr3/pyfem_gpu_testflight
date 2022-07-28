@@ -59,6 +59,24 @@ class QuadratureBase(ABC):
             return self.weights
 
 
+class QuadratureLinear1D(QuadratureBase):
+    @time_this
+    def __init__(self):
+        pts = np.array([[-1.0 / np.sqrt(3.0)], [1.0 / np.sqrt(3.0)]])
+        weights = np.array([1.0, 1.0])
+        super().__init__(pts, weights)
+        return
+
+
+class QuadratureQuadratic1D(QuadratureBase):
+    @time_this
+    def __init__(self):
+        pts = np.array([[-np.sqrt(3.0 / 5.0)], [0], [np.sqrt(3.0 / 5.0)]])
+        weights = np.array([5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0])
+        super().__init__(pts, weights)
+        return
+
+
 class QuadratureTriangle2D(QuadratureBase):
     """
     Linear triangular element only has one quadrature point (L1=1/3, L2=1/3)
@@ -166,6 +184,45 @@ class QuadratureBrick333Point(QuadratureBase):
         return
 
 
+class QuadratureProduct(QuadratureBase):
+    """
+    Compute and return a quadrature that is the Cartesian product of smaller quadratures.
+    Call with a tuple of quadratures to acquire their product in the same order.
+    That is, QuadratureProduct((QuadratureTriangle2D(), QuadratureLinear1D())) will yield
+    a triangular-prism quadrature with the prismatic axis in the 3rd coordinate.
+    """
+
+    @time_this
+    def __init__(self, *Quadratures):
+
+        # Initialize a 0-dimensional quadrature
+        pts = np.array([[]])
+        weights = [1]
+
+        # Multiply each successive quadrature into it
+        for Quadrature in Quadratures:
+
+            pts_1 = pts
+            pts_2 = Quadrature.get_pt()
+
+            weights_1 = weights
+            weights_2 = Quadrature.get_weight()
+
+            pts = np.concatenate(
+                (
+                    np.einsum("ik,j->ijk", pts_1, np.ones(pts_2.shape[0])),
+                    np.einsum("jk,i->ijk", pts_2, np.ones(pts_1.shape[0])),
+                ),
+                2,
+            ).reshape(
+                (pts_1.shape[0] * pts_2.shape[0], pts_1.shape[1] + pts_2.shape[1])
+            )
+
+            weights = np.einsum("i,j->ji", weights_2, weights_1).flatten()
+        super().__init__(pts, weights)
+        return
+
+
 class BasisBase(ABC):
     """
     Abstract class for the element basis function
@@ -244,6 +301,63 @@ class BasisBase(ABC):
         return self.Nderiv
 
 
+class BasisLinear1D(BasisBase):
+    """
+    A 2-node, 1-dimensional linear basis.
+    """
+
+    @time_this
+    def __init__(self, quadrature: QuadratureBase):
+        ndims = 1
+        nnodes_per_elem = 2
+        super().__init__(ndims, nnodes_per_elem, quadrature)
+        return
+
+    @time_this
+    def _eval_shape_fun_on_quad_pt(self, qpt):
+        shape_vals = [
+            0.5 * (1.0 - qpt[0]),
+            0.5 * (1.0 + qpt[0]),
+        ]
+        return shape_vals
+
+    @time_this
+    def _eval_shape_deriv_on_quad_pt(self, qpt):
+        shape_derivs = [
+            -0.5,
+            +0.5,
+        ]
+        return shape_derivs
+
+
+class BasisQuadratic1D(BasisBase):
+    """
+    A 3-node, 1-dimensional quadratic basis.
+    """
+
+    def __init__(self, quadrature: QuadratureBase):
+        ndims = 1
+        nnodes_per_elem = 3
+        super().__init__(ndims, nnodes_per_elem, quadrature)
+        return
+
+    def _eval_shape_fun_on_quad_pt(self, qpt):
+        shape_vals = [
+            (0.5 * qpt[0]) * (qpt[0] - 1.0),
+            (1.0 - qpt[0]) * (qpt[0] + 1.0),
+            (0.5 * qpt[0]) * (qpt[0] + 1.0),
+        ]
+        return shape_vals
+
+    def _eval_shape_deriv_on_quad_pt(self, qpt):
+        shape_derivs = [
+            qpt[0] - 0.5,
+            qpt[0] * -2.0,
+            qpt[0] + 0.5,
+        ]
+        return shape_derivs
+
+
 class BasisBilinear2D(BasisBase):
     @time_this
     def __init__(self, quadrature: QuadratureBase):
@@ -274,6 +388,7 @@ class BasisBilinear2D(BasisBase):
              0.25 * (1.0 + qpt[0]),
             -0.25 * (1.0 + qpt[1]),
              0.25 * (1.0 - qpt[0]),
+            # fmt: on
         ]
         return shape_derivs
 
@@ -328,6 +443,7 @@ class BasisBlock3D(BasisBase):
             -0.125 * (1.0 + qpt[1]) * (1.0 + qpt[2]),
              0.125 * (1.0 - qpt[0]) * (1.0 + qpt[2]),
              0.125 * (1.0 - qpt[0]) * (1.0 + qpt[1]),
+            # fmt: on
         ]
         return shape_derivs
 
@@ -622,6 +738,83 @@ class BasisBrick20Nodes(BasisBase):
                     * (1.0 + qpt[0] * self.nodecoords[i, 0])
                     * (1.0 + qpt[1] * self.nodecoords[i, 1])
                 )
+        return shape_derivs
+
+
+class BasisProduct(BasisBase):
+    """
+    Construct and return a basis that is the Cartesian product of two smaller bases.
+    n.b.: I don't know how this will work if used with a 3-element linear basis -
+    it might create a "floating" interior node - will that be a problem?
+    """
+
+    @time_this
+    def __init__(self, *Bases):
+
+        # Initialize a zero-dimensional basis
+        ndims = 0
+        nnodes_per_elem = 1
+        quadrature = QuadratureProduct()  # this returns a null quadrature
+
+        # Multiply successive bases into it
+        for Basis in Bases:
+            ndims += Basis.ndims
+            nnodes_per_elem *= Basis.nnodes_per_elem
+            quadrature = QuadratureProduct(quadrature, Basis.quadrature)
+
+        # Initialize the final product basis and save its components
+        super().__init__(ndims, nnodes_per_elem, quadrature)
+        self.Bases = Bases
+
+        return
+
+    @time_this
+    def _eval_shape_fun_on_quad_pt(self, qpt):
+
+        # Initialize a zero-dimensional basis
+        shape_vals = [1]
+        ndims = 0
+
+        # Compute new shape values by successive Cartesian combination
+        for Basis in self.Bases:
+            shape_vals_new = Basis._eval_shape_fun_on_quad_pt(
+                qpt[ndims : (ndims + Basis.ndims)]
+            )
+            shape_vals = np.einsum("i, j -> ij", shape_vals, shape_vals_new).flatten()
+            ndims += Basis.ndims
+
+        return shape_vals
+
+    @time_this
+    def _eval_shape_deriv_on_quad_pt(self, qpt):
+
+        shape_vals = [1]
+        shape_derivs = np.array([[]])
+        ndims = 0
+        nnodes_per_elem = 1
+        for Basis in self.Bases:
+            shape_derivs_new = np.array(
+                Basis._eval_shape_deriv_on_quad_pt(qpt[ndims : (ndims + Basis.ndims)])
+            ).reshape((Basis.nnodes_per_elem, Basis.ndims))
+            shape_vals_new = Basis._eval_shape_fun_on_quad_pt(
+                qpt[ndims : (ndims + Basis.ndims)]
+            )
+
+            shape_derivs = np.concatenate(
+                (
+                    np.einsum("j, ik -> ijk", shape_vals_new, shape_derivs),
+                    np.einsum("i, jk -> ijk", shape_vals, shape_derivs_new),
+                ),
+                2,
+            ).flatten()
+            shape_vals = np.einsum("i, j -> ij", shape_vals, shape_vals_new).flatten()
+
+            ndims += Basis.ndims
+            nnodes_per_elem *= Basis.nnodes_per_elem
+
+            shape_derivs = shape_derivs.reshape((nnodes_per_elem, ndims))
+        shape_derivs = shape_derivs.flatten()
+
         return shape_derivs
 
 
@@ -1151,13 +1344,7 @@ class LinearPoisson(ModelBase):
     @time_this
     def _einsum_element_jacobian(self, kappa_q, detJq, wq, Ngrad, Ke):
         Ke[...] = np.einsum(
-            "iq,iq,q,iqjl,iqkl -> ijk",
-            kappa_q,
-            detJq,
-            wq,
-            Ngrad,
-            Ngrad,
-            optimize=True,
+            "iq,iq,q,iqjl,iqkl -> ijk", kappa_q, detJq, wq, Ngrad, Ngrad, optimize=True,
         )
         return
 
@@ -1352,11 +1539,7 @@ class NonlinearPoisson2D(ModelBase):
     def compute_rhs(self, xdv, u):
         # Compute element rhs vector -> rhs_e
         # self.rhs_e[...] = 0.0
-        self._compute_element_rhs(
-            xdv,
-            u,
-            self.rhs_e,
-        )
+        self._compute_element_rhs(xdv, u, self.rhs_e)
 
         # Assemble the global rhs vector -> rhs
         self.rhs[...] = 0.0
@@ -1441,7 +1624,7 @@ class NonlinearPoisson2D(ModelBase):
         num_x_vals = np.shape(xdv)[0]
         for k in range(num_x_vals):
             coef = special.binom(num_x_vals - 1, k)
-            xarg = coef * (1.0 - xvals) ** (num_x_vals - 1 - k) * xvals**k
+            xarg = coef * (1.0 - xvals) ** (num_x_vals - 1 - k) * xvals ** k
             yarg = 4.0 * yvals * (1.0 - yvals)
             hfun_vals[...] += xdv[k] * xarg * yarg
         hfun_vals[...] += 1.0
@@ -1505,7 +1688,7 @@ class NonlinearPoisson2D(ModelBase):
         wq = self.quadrature.get_weight()
         rhs_e[...] = np.einsum(
             "nq,nqjl,nqkl,nk -> nj",
-            self.detJq * self.hfun_vals * (1.0 + uq**2) * wq,
+            self.detJq * self.hfun_vals * (1.0 + uq ** 2) * wq,
             self.Ngrad,
             self.Ngrad,
             ue,
@@ -1570,7 +1753,7 @@ class NonlinearPoisson2D(ModelBase):
         wq = self.quadrature.get_weight()
         Ke[...] = np.einsum(
             "nq,q,nqjl,nqkl -> njk",
-            self.detJq * self.hfun_vals * (1.0 + uq**2),
+            self.detJq * self.hfun_vals * (1.0 + uq ** 2),
             wq,
             self.Ngrad,
             self.Ngrad,
@@ -1695,13 +1878,7 @@ class LinearElasticity(ModelBase):
 
         # Allocate material property at quadratures
         self.Cq = np.zeros((self.nelems, self.nquads))
-        self.Cqderiv = np.zeros(
-            (
-                self.nelems,
-                self.nquads,
-                self.nnodes_per_elem,
-            )
-        )
+        self.Cqderiv = np.zeros((self.nelems, self.nquads, self.nnodes_per_elem))
 
         # Allocate rho at element and quadrature
         self.rho_e = np.zeros((self.nelems, self.nnodes_per_elem))
@@ -1723,7 +1900,7 @@ class LinearElasticity(ModelBase):
             self.C0 = E * np.array(
                 [[1.0, nu, 0.0], [nu, 1.0, 0.0], [0.0, 0.0, 0.5 * (1.0 - nu)]]
             )
-            self.C0 *= 1.0 / (1.0 - nu**2)
+            self.C0 *= 1.0 / (1.0 - nu ** 2)
         else:
             self.C0 = np.zeros((6, 6))
             self.C0[0, 0] = self.C0[1, 1] = self.C0[2, 2] = 1 - nu
@@ -1844,6 +2021,452 @@ class LinearElasticity(ModelBase):
         """
         grad = np.ones(self.nnodes) / self.nnodes
         return grad
+
+    @time_this
+    def compute_tangent_stiffness(self, rho, solver="cg"):
+        """
+        Compute the element tangent stiffness matrices Ge and assemble the
+        global G
+
+        Return:
+            G: (sparse) global tangent stiffness matrix
+        """
+        # Compute Jacobian derivatives
+        Nderiv = self.basis.eval_shape_fun_deriv()
+
+        # Compute Jacobian transformation -> Jq
+        utils.compute_jtrans(self.Xe, Nderiv, self.Jq)
+
+        # Compute Jacobian determinant -> detJq
+        utils.compute_jdet(self.Jq, self.detJq)
+
+        # Compute shape function gradient -> (invJq), Ngrad
+        utils.compute_basis_grad(self.Jq, self.detJq, Nderiv, self.invJq, self.Ngrad)
+
+        # Compute Be matrix -> Be
+        self._compute_element_Bmat(self.Ngrad, self.Be)
+
+        # Get quadrature weights
+        wq = self.quadrature.get_weight()
+
+        # Compute the displacement field (ndofs)
+        # Could move displacement out of compliance to make this more efficient
+        _, u = self.compliance(rho, solver)
+
+        # Reshape the displacement field to be (nnodes, ndof_per_node)
+        u = u.reshape((self.nnodes, self.ndof_per_node))
+
+        # Initialize array to hold scattered displacements
+        ue = np.zeros((self.nelems, self.nnodes_per_elem, self.ndof_per_node))
+
+        # Scatter nodal displacement to elements
+        utils.scatter_node_to_elem(self.conn, u, ue)
+
+        # Reshape elementwise displacements to shape compatible with Be
+        ue = ue.reshape((self.nelems, self.nnodes_per_elem * self.ndof_per_node))
+
+        ### Sparse calculation of Z: faster, but messier
+        # Computes 10/64 values for 2D quads, 36/576 for 3D hexes, etc.
+        # Triangular number generator function, used to assemble l indices array
+        def tri(x):
+            return int(x * (x + 1) / 2)
+
+        # Construct l array, used to index into B during its construction
+        # This array contains upper triangular indices of a (nnodes_per_elem)² matrix
+        l = np.zeros((tri(self.nnodes_per_elem), 2), int)
+        for i in range(self.nnodes_per_elem):
+            lrange = range(tri(i), tri(i + 1))
+            l[lrange, 0] = i
+            l[lrange, 1] = range(i + 1)
+
+        # Initialize arrays used to compute nonlinear stresses
+        # fmt: off
+        P1 = np.zeros((
+                self.nelems,
+                self.nquads,
+                self.ndims,
+                tri(self.ndof_per_node),
+                self.nnodes_per_elem * self.ndof_per_node,
+            ))
+        # fmt: on
+        P2 = np.copy(P1)
+
+        if self.ndof_per_node == 2:
+            # Shorthands for shape function derivatives (nelems, nquads, nnodes_per_elem)
+            dxN = self.Be[..., 0, 0::2]
+            dyN = self.Be[..., 1, 1::2]
+            dN = np.stack((dxN, dyN), -2)
+
+            # Compute b matrix used to efficiently generate Z
+            # (nelems, nquads, tri{ndof_per_node}, tri{nnodes_per_elem})
+            # fmt: off
+            b = np.stack((
+                    dxN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dyN[..., l[:, 0]] * dyN[..., l[:, 1]],
+                    dxN[..., l[:, 0]] * dyN[..., l[:, 1]] + dyN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                ), -2)
+            # fmt: on
+
+            # Construct arrays used to compute nonlinear stresses
+            for i in range(2):
+                # Construct upper normal-stress generator matrix
+                for j in range(2):
+                    P1[..., i, j, j::2] = dN[..., i, :]
+                    P2[..., i, j, j::2] = dN[..., i, :]
+
+                # Construct lower shear-stress generator matrix
+                P1[..., i, 2, i::2] = dxN
+                P2[..., i, 2, i::2] = dyN
+
+            # stress weight array
+            k = np.array([1, 1, 2])
+
+        elif self.ndof_per_node == 3:
+            # Shorthands for shape function derivatives each (nelems, nquads, nnodes_per_elem)
+            dxN = self.Be[..., 0, 0::3]
+            dyN = self.Be[..., 1, 1::3]
+            dzN = self.Be[..., 2, 2::3]
+            dN = np.stack((dxN, dyN, dzN), -2)
+
+            # Compute b matrix used to efficiently generate Z
+            # fmt: off
+            b = np.stack((
+                    dxN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dyN[..., l[:, 0]] * dyN[..., l[:, 1]],
+                    dzN[..., l[:, 0]] * dzN[..., l[:, 1]],
+                    dxN[..., l[:, 0]] * dyN[..., l[:, 1]] + dyN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dxN[..., l[:, 0]] * dzN[..., l[:, 1]] + dzN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dyN[..., l[:, 0]] * dzN[..., l[:, 1]] + dzN[..., l[:, 0]] * dyN[..., l[:, 1]],
+                ), -2)
+            # fmt: on
+
+            # Construct arrays used to compute nonlinear stresses
+            for i in range(3):
+                # Construct upper normal-stress generator matrix
+                for j in range(3):
+                    P1[..., i, j, j::2] = dN[..., i, :]
+                    P2[..., i, j, j::2] = dN[..., i, :]
+
+                # Construct lower shear-stress generator matrix
+                P1[..., i, 3, i::3] = dxN
+                P1[..., i, 4, i::3] = dzN
+                P1[..., i, 5, i::3] = dyN
+
+                P2[..., i, 3, i::3] = dyN
+                P2[..., i, 4, i::3] = dxN
+                P2[..., i, 5, i::3] = dzN
+
+            k = np.array([1, 1, 1, 2, 2, 2])
+
+        # Compute linear strains
+        ee = np.einsum(
+            # Be   ue
+            "eqij, ej -> eqi",
+            self.Be,
+            ue,
+        )
+
+        # Compute nonlinear strains
+        ee += np.einsum(
+            # k  P1    ue   P2    ue -> ee
+            "i, eqpij, ej, eqpik, ek -> eqi",
+            k,
+            P1,
+            ue,
+            P2,
+            ue,
+        )
+
+        # Accumulate unique entries of Z matrix (nelems, tri{nnodes_per_elem})
+        z = np.einsum(
+            # J  w   b    C0  ee  -> z
+            "eq, q, eqji, jk, eqk -> ei",
+            self.detJq,
+            wq,
+            b,
+            self.C0,
+            ee,
+        )
+
+        # Convert Z to triangular matrix
+        Z = np.zeros((self.nelems, self.nnodes_per_elem, self.nnodes_per_elem))
+        Z[:, l[:, 0], l[:, 1]] = z[...]
+
+        # Reflect Z into the appropriate square matrix
+        # This awkward construction is the only way I can find to do the diagonal operation I need
+        Z += Z.transpose((0, 2, 1)) - np.einsum(
+            # Z ⊙ I -> diag(Z)
+            "ijk, jk -> ijk",
+            Z,
+            np.eye(self.nnodes_per_elem),
+        )
+        ### End sparse calculation of Z
+
+        ### Dense calculation of Z: slower but compacter and more reliable
+        ### Compute vectorial stress field (nelems, nquads, tri{ndof_per_node})
+        # sv = np.einsum(
+        #     #C0   Be   ue ->  se
+        #     "ij, eqjk, ek -> eqi",
+        #     self.C0,
+        #     self.Be,
+        #     ue,
+        # )
+        #
+        ### Allocate space for tensorial stress field
+        # se = np.zeros((self.nelems, self.nquads, self.ndims, self.ndims))
+        #
+        # if self.ndims == 2:
+        #     # Remap stress field into tensor form (compatible with b)
+        #     se[..., (0, 0, 1, 1), (0, 1, 0, 1)] = sv[..., (0, 2, 2, 1)]
+        #
+        #     # Compute compressed B1 matrix used to generate Z -> Ge
+        #     B1 = np.stack((dxN, dyN), -2)
+        #
+        # elif self.ndims == 3:
+        #     # Remap stress field into tensor form (compatible with b)
+        #     se[
+        #         ...,
+        #         (0, 0, 0, 1, 1, 1, 2, 2, 2),
+        #         (0, 1, 2, 0, 1, 2, 0, 1, 2)
+        #     ] = sv[..., (0, 3, 4, 3, 1, 5, 4, 5, 2)]
+        #
+        #     # Compute compressed B1 matrix used to generate Z -> Ge
+        #     B1 = np.stack((dxN, dyN, dzN), -2)
+        #
+        ### Compute Z (compressed Ge matrix)
+        # Z = np.einsum(
+        #    #dJ, w,  B1    se    B1  ->  Z
+        #    "eq, q, eqji, eqjk, eqkl -> eil",
+        #    self.detJq,
+        #    wq,
+        #    B1,
+        #    se,
+        #    B1,
+        # )
+        ### End dense computation of Z
+
+        # Expand the elemental tangent stiffness matrix
+        Ge = np.kron(Z, np.eye(self.ndof_per_node))
+
+        # Assemble the global tangent stiffness matrix
+        G = self._assemble_jacobian(Ge)
+
+        return G
+
+    @time_this
+    def _compute_buck_eig(self, rho, n_eig):
+        """
+        Compute the buckling eigenpairs
+        """
+
+        # Acquire stiffness matrices
+        K = self.compute_jacobian(rho)
+        G = self.compute_tangent_stiffness(rho)
+
+        # Compute eigenpairs
+        eivals, eivecs = sparse.linalg.eigsh(G, k=n_eig + 4, M=K, which="SA")
+
+        # Sort eigenpairs
+        ii = np.argsort(eivals)
+        mu = -eivals[ii[:n_eig]]
+        eivecs = eivecs[:, ii[:n_eig]]
+        phi = eivecs / np.sqrt((eivecs.T * K).dot(eivecs).diagonal())
+
+        return mu, phi
+
+    @time_this
+    def _compute_buck_eig_sens(self, rho, n_eig, solver="cg"):
+        """
+        Compute the sensitivity of buckling eigenvalues w.r.t. nodal
+        density rho
+
+        """
+
+        # Update self constants
+        Nderiv = self.basis.eval_shape_fun_deriv()
+        utils.compute_jtrans(self.Xe, Nderiv, self.Jq)
+        utils.compute_jdet(self.Jq, self.detJq)
+        utils.compute_basis_grad(self.Jq, self.detJq, Nderiv, self.invJq, self.Ngrad)
+        self._compute_element_Bmat(self.Ngrad, self.Be)
+        wq = self.quadrature.get_weight()
+
+        # Compute the elemental displacement displacement field
+        # Could move displacement out of compliance to make this more efficient
+        _, u = self.compliance(rho)
+        u = u.reshape((self.nodes, self.ndof_per_node))
+        ue = np.zeros((self.nelems, self.nnodes_per_elem, self.ndof_per_node))
+        utils.scatter_node_to_elem(self.conn, u, ue)
+        ue = ue.reshape((self.nelems, self.nnodes_per_elem * self.ndof_per_node))
+
+        # Update the penalized material properties
+        self._update_material_property(rho)
+        self._update_material_property_deriv(rho)
+
+        # Compute vectorial stress per unit displacement
+        # (nelems, quads, tri{ndof_per_node}, nnodes_per_elem * ndof_per_node)
+        dsv_du = np.einsum(
+            # C0  Be  -> ∂s/∂u
+            "ij, eqjk -> eqik",
+            self.C0,
+            self.Be,
+        )
+
+        def tri(x):
+            return int(x * (x + 1) / 2)
+
+        # Construct l array, used to index into B during its construction
+        # This array contains upper triangular indices of a (nnodes_per_elem)² matrix
+        l = np.zeros((tri(self.nnodes_per_elem), 2), int)
+        for i in range(self.nnodes_per_elem):
+            lrange = range(tri(i), tri(i + 1))
+            l[lrange, 0] = i
+            l[lrange, 1] = range(i + 1)
+
+        if self.ndof_per_node == 2:
+            # Shorthands for shape function derivatives (nelems, nquads, nnodes_per_elem)
+            dxN = self.Be[..., 0, 0::2]
+            dyN = self.Be[..., 1, 1::2]
+
+            # Compute b matrix used to efficiently generate dZdu
+            # (nelems, nquads, tri{ndof_per_node}, tri{nnodes_per_elem})
+            # fmt: off
+            b = np.stack((
+                    dxN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dyN[..., l[:, 0]] * dyN[..., l[:, 1]],
+                    dxN[..., l[:, 0]] * dyN[..., l[:, 1]] + dyN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                ), -2)
+            # fmt: on
+
+            # Reshape stress vector
+
+        elif self.ndof_per_node == 3:
+            # Shorthands for shape function derivatives (nelems, nquads, nnodes_per_elem)
+            dxN = self.Be[..., 0, 0::3]
+            dyN = self.Be[..., 1, 1::3]
+            dzN = self.Be[..., 2, 2::3]
+
+            # Compute b matrix used to efficiently generate dZdu
+            # fmt: off
+            b = np.stack((
+                    dxN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dyN[..., l[:, 0]] * dyN[..., l[:, 1]],
+                    dzN[..., l[:, 0]] * dzN[..., l[:, 1]],
+                    dxN[..., l[:, 0]] * dyN[..., l[:, 1]] + dyN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dxN[..., l[:, 0]] * dzN[..., l[:, 1]] + dzN[..., l[:, 0]] * dxN[..., l[:, 1]],
+                    dyN[..., l[:, 0]] * dzN[..., l[:, 1]] + dzN[..., l[:, 0]] * dyN[..., l[:, 1]],
+                ), -2)
+            # fmt: on
+
+        # Accumulate unique entries of ∂Z/∂u
+        # (nelems, tri{nnodes_per_elem}, ndof_per_node * nnodes_per_elem)
+        dzdu = np.einsum(
+            # J  w   b    C0   Be  ->∂z/∂u
+            "eq, q, eqji, jk, eqkl -> eil",
+            self.detJq,
+            wq,
+            b,
+            self.C0,
+            self.Be,
+        )
+        dzdu[:, (l[:, 0] != l[:, 1]), :] *= 2
+
+        # Accumulate unique entries of Z
+        z = np.einsum(
+            # ∂z  u  -> z
+            "eil, el -> ei",
+            dzdu,
+            ue,
+        )
+
+        # Compute buckling eigenvalues
+        mu, phi = self._compute_buck_eig(rho, n_eig)
+        phi = phi.reshape((self.nnodes, self.ndof_per_node, n_eig))
+
+        # Scatter phi to elements
+        phi_e = np.zeros((self.nelems, self.nnodes_per_elem, self.ndof_per_node, n_eig))
+        utils.scatter_node_to_elem(self.conn, phi, phi_e)
+        phi_e = phi_e.reshape(
+            (self.nelems, self.nnodes_per_elem * self.ndof_per_node, n_eig)
+        )
+
+        # Construct elemental p matrix
+        # (nelems, tri{nnodes_per_elem})
+        # fmt: off
+        if self.ndims == 2:
+            p_e = (
+                phi_e[:, 2 * l[:, 0]    ] * phi_e[:, 2 * l[:, 1]    ] +
+                phi_e[:, 2 * l[:, 0] + 1] * phi_e[:, 2 * l[:, 1] + 1]
+            )
+        elif self.ndims == 3:
+            p_e = (
+                phi_e[:, 3 * l[:, 0]    ] * phi_e[:, 3 * l[:, 1]    ] +
+                phi_e[:, 3 * l[:, 0] + 1] * phi_e[:, 3 * l[:, 1] + 1] +
+                phi_e[:, 3 * l[:, 0] + 2] * phi_e[:, 3 * l[:, 1] + 2]
+            )
+        # fmt: on
+
+        # why can't we just save self.E? this is gross
+        # do we even need this except for penalization? :(
+        if self.ndims == 2:
+            E = (
+                (self.C0[0, 0] + self.C0[0, 1])
+                * (self.C0[0, 0] - self.C0[0, 1])
+                / self.C0[0, 0]
+            )
+        elif self.ndims == 3:
+            E = (
+                2
+                * (self.C0[0, 0] + 2 * self.C0[0, 1])
+                * (self.C0[3, 3])
+                / (self.C0[0, 0] + self.C0[0, 1])
+            )
+
+        sG0 = E * rho ** self.p
+        dkeG = self.p * E * rho ** (self.p - 1) * z
+        dkeG[:, (l[:, 0] != l[:, 1]), :] *= 2
+
+        phiDKphi = np.zeros((self.nnodes, n_eig))
+        phiDGphi = np.zeros((self.nnodes, n_eig))
+        adjL = np.zeros(self.nnodes * self.ndims, n_eig)
+        adj = np.zeros(self.nelems, n_eig)
+
+        for j in range(n_eig):
+            # Compute first sensitivity component (ϕT dK/dρ ϕ)
+            phiDKphi[:, j] = self._compute_K_dv_sens(rho, phi[:, j], phi[:, j])
+
+            # Compute second sensitivity component (ϕT dG/dρ ϕ)
+            # This should not use dzdu! it uses
+            phiDGphi[:, j] = np.einsum("ei, ei -> e", dzdu, p_e)
+
+        # Compute adjoint load
+        adjL = np.einsum("e, ei, eij -> ej", sG0, p_e, dzdu,)
+        K = self.compute_jacobian(rho)
+
+        for j in range(n_eig):
+            vv = adjV[:, j]
+            adj[:, j] = np.einsum(
+                #
+                "en, ei, eik, ek -> e",
+                # dsK,
+                ue,
+                # Ke0,
+                # vve,
+            )
+
+        # Solve adjoint problem
+        if solver == "direct":
+            adjV = spsolve(K, adjL)
+        else:
+            ml = pyamg.smoothed_aggregation_solver(K)
+            M = ml.aspreconditioner()
+            if solver == "cg":
+                adjV, fail = cg(K, adjL, tol=1e-8, M=M, atol=0.0)
+            else:
+                adjV, fail = gmres(K, adjL, tol=1e-8, M=M, atol=0.0)
+
+        dmu = -(phiDGphi + mu * phiDKphi - adj)
+
+        return
 
     @time_this
     def _compute_K_dv_sens(self, rho, phi, psi):
@@ -1991,7 +2614,7 @@ class LinearElasticity(ModelBase):
     @time_this
     def _einsum_element_jacobian(self, detJq, wq, Be, Cq, C0, Ke):
         Ke[...] = np.einsum(
-            "iq,q,iqnj,iq,nm,iqmk->ijk",
+            "iq, q, iqnj, iq, nm, iqmk -> ijk",
             detJq,
             wq,
             Be,
@@ -2102,7 +2725,7 @@ class Helmholtz(ModelBase):
     @time_this
     def _einsum_element_jacobian(self, detJq, r0, wq, Ngrad, Ke):
         Ke[...] = np.einsum(
-            "iq,q,iqjl,iqkl -> ijk", detJq * r0**2, wq, Ngrad, Ngrad, optimize=True
+            "iq,q,iqjl,iqkl -> ijk", detJq * r0 ** 2, wq, Ngrad, Ngrad, optimize=True
         )
         return
 
